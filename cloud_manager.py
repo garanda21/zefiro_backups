@@ -4,14 +4,28 @@ import os
 import datetime
 
 class CloudManager:
-    def __init__(self, domain, username, password):
+    def __init__(self, domain, username=None, password=None, validationkey=None, session_cookie=None):
         self.domain = domain
         self.username = username
         self.password = password
         self.session = requests.Session()
+        # Some endpoints sit behind CloudFront/WAF and reject non-browser clients,
+        # so present a browser-like User-Agent for every request.
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        })
         self.base_url = f'https://{self.domain}/'
-        self.validationkey = self.login()
-    
+        if validationkey:
+            # Session injection mode: the login endpoint is protected by the
+            # provider's WAF/MFA, so reuse a validationkey (and optionally the
+            # JSESSIONID cookie) captured from an authenticated browser session.
+            self.validationkey = validationkey
+            if session_cookie:
+                self.session.cookies.set('JSESSIONID', session_cookie, domain=self.domain)
+        else:
+            self.validationkey = self.login()
+
     def login(self):
         login_url = self.base_url + "sapi/login"
         params = {'action': 'login'}

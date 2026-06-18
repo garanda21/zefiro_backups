@@ -23,10 +23,39 @@ It’s up to you to create UNCATEGORIZED_FOLDER inside BACKUPS_FOLDEE to include
 | PROVIDER_DOMAIN  | Zefiro / Your ISP's domain    |
 | EMAIL | your account email     |
 | PASSWORD    | your account password    |
+| VALIDATION_KEY | a validationkey captured from an authenticated browser session — see *Authentication* below |
+| SESSION_COOKIE | the `JSESSIONID` cookie value from the **same** browser session (required together with VALIDATION_KEY) |
 | BACKUPS_FOLDER_ID | ID of the root folder to take backups from |
 | UNCATEGORIZED_FOLDER_ID | ID of the folder to automatically move all the content uploaded from apps |
 | BACKUP_CRON | cronjob expression to schedule your backups |
 | UNCATEGORIZED_CRON | cronjob expression to automatically move app uploaded content to UNCATEGORIZED_FOLDER_ID |
+
+## Authentication
+
+> **Important:** some providers (e.g. O2 Spain at `cloud.o2online.es`) have placed the
+> `/sapi/login` endpoint behind a CloudFront/WAF anti-bot layer and enabled multi-factor
+> authentication (MFA). Automated user+password login from a script is blocked there
+> (the server returns `403 Request blocked` or `401`). The data endpoints
+> (listing, downloading, moving files, etc.) are **not** affected — they only need a
+> valid `validationkey`.
+
+To work around this, skip the automated login and inject a session captured from your
+browser:
+
+1. Log in to your provider's cloud storage in a desktop browser.
+2. Open the browser's developer tools → **Network** tab.
+3. Trigger any action and look for a request such as
+   `/sapi/media/folder?action=get&validationkey=xxxxx`.
+4. Copy the `validationkey` value from the request URL → set it as `VALIDATION_KEY`.
+5. From the **Request Headers** of that same request, copy the `JSESSIONID` cookie value
+   → set it as `SESSION_COOKIE`.
+
+Both values are required together: the validationkey alone returns `401` — it only
+authenticates when paired with the matching `JSESSIONID` session cookie. When both are
+set, `EMAIL`/`PASSWORD` are not required. The session is tied to your browser login and
+**will eventually expire**, so you'll need to refresh both values periodically. If your
+provider does **not** enforce the WAF/MFA (e.g. plain Zefiro), you can keep using
+`EMAIL`/`PASSWORD` and leave `VALIDATION_KEY`/`SESSION_COOKIE` empty.
 
 Available provider domains:
 
