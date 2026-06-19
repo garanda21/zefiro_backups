@@ -20,6 +20,9 @@ def main():
         validationkey=VALIDATION_KEY,
         session_cookie=SESSION_COOKIE,
     )
+    # Fail fast with a clear message if the injected session has expired.
+    if VALIDATION_KEY:
+        cm.check_session()
     if SYNC_DIRECTION in ("download", "both"):
         print("== Sincronizando cloud -> local ==")
         cm.sync_remote_path("/backups", BACKUPS_FOLDER_ID)

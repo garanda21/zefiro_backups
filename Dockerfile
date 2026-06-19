@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+# Unbuffered output so logs show up immediately in `docker logs`
+ENV PYTHONUNBUFFERED=1
+
 # Install cron
 RUN apt-get update && \
     apt-get install -y cron && \

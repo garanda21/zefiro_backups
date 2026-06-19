@@ -40,6 +40,23 @@ class CloudManager:
         user_info = response.json()
         return user_info['data']['validationkey']
     
+    def check_session(self):
+        # Lightweight validity check. When the validationkey/JSESSIONID have
+        # expired the server returns HTML (login page) instead of JSON; surface a
+        # clear, actionable error instead of a confusing JSONDecodeError later on.
+        url = self.base_url + 'sapi/media/folder'
+        response = self.session.post(url, params={'action': 'get', 'limit': 1, 'validationkey': self.validationkey})
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        if response.status_code != 200 or not isinstance(data, dict) or 'data' not in data:
+            raise RuntimeError(
+                "Sesión inválida o caducada (HTTP %s). Refresca VALIDATION_KEY y "
+                "SESSION_COOKIE desde el navegador." % response.status_code
+            )
+        return True
+
     def get_file_info(self,file_id):
         get_file_info_url = self.base_url + 'sapi/media'
         params = {'action':'get','validationkey': self.validationkey}

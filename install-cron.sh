@@ -46,15 +46,24 @@ SYNC_DIRECTION="${SYNC_DIRECTION:-download}"
 chmod 600 "$ENV_FILE" || true
 
 # ---- Create crontab ----
+# Redirect each job's output to the container's stdout/stderr (PID 1) so it is
+# visible via `docker logs`. Use `python -u` so output is not buffered.
 : > /tmp/crontab
-echo "$SYNC_CRON $PYTHON_BIN /app/sync.py" >> /tmp/crontab
+echo "$SYNC_CRON $PYTHON_BIN -u /app/sync.py > /proc/1/fd/1 2>/proc/1/fd/2" >> /tmp/crontab
 
 # Optional uncategorized job (only if both its vars are set)
 if [ -n "$UNCATEGORIZED_CRON" ] && [ -n "$UNCATEGORIZED_FOLDER_ID" ]; then
-  echo "$UNCATEGORIZED_CRON $PYTHON_BIN /app/uncategorized.py" >> /tmp/crontab
+  echo "$UNCATEGORIZED_CRON $PYTHON_BIN -u /app/uncategorized.py > /proc/1/fd/1 2>/proc/1/fd/2" >> /tmp/crontab
 fi
 
 crontab /tmp/crontab
 
+echo "[entrypoint] Configuración lista. SYNC_DIRECTION=$SYNC_DIRECTION, SYNC_CRON=\"$SYNC_CRON\""
+
+# ---- Run once on startup for immediate feedback ----
+echo "[entrypoint] Ejecutando sincronización inicial..."
+$PYTHON_BIN -u /app/sync.py || echo "[entrypoint] La sincronización inicial terminó con errores (ver arriba)."
+
 # ---- Arrancar cron en primer plano ----
+echo "[entrypoint] Arrancando cron (próximas ejecuciones según SYNC_CRON)..."
 cron -f
