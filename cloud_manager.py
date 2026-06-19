@@ -3,6 +3,12 @@ import json
 import os
 import datetime
 import mimetypes
+import time
+
+
+class SessionExpiredError(Exception):
+    """Raised when the validationkey/JSESSIONID are no longer valid."""
+    pass
 
 class CloudManager:
     def __init__(self, domain, username=None, password=None, validationkey=None, session_cookie=None, upload_endpoint=None):
@@ -13,6 +19,8 @@ class CloudManager:
         # lazily from /sapi/system/information (see _upload_base_url).
         self.upload_endpoint = upload_endpoint
         self._upload_base = None
+        self._sysinfo = None
+        self._max_upload = None
         self.session = requests.Session()
         # Some endpoints sit behind CloudFront/WAF and reject non-browser clients,
         # so present a browser-like User-Agent for every request.
@@ -154,6 +162,16 @@ class CloudManager:
         json_data = {"data":{"magic":False,"offline":False,"name":name,"parentid":parentid}}
         response = self.session.post(create_folder_url,json=json_data,params=params)
 
+    def _system_info(self):
+        # Cached /sapi/system/information (used for upload endpoint and limits).
+        if self._sysinfo is None:
+            try:
+                response = self.session.get(self.base_url + 'sapi/system/information', params={'action': 'get'})
+                self._sysinfo = response.json()
+            except Exception:
+                self._sysinfo = {}
+        return self._sysinfo
+
     def _upload_base_url(self):
         # Resolve the upload endpoint. Some providers (e.g. O2) serve uploads from a
         # dedicated host (sapi.upload.endpoint) instead of the main domain.
@@ -161,19 +179,25 @@ class CloudManager:
             return self._upload_base
         base = self.upload_endpoint
         if not base:
-            try:
-                info_url = self.base_url + 'sapi/system/information'
-                response = self.session.get(info_url, params={'action': 'get'})
-                info = response.json()
-                base = info.get('sapi.client.web.upload.endpoint') or info.get('sapi.upload.endpoint')
-            except Exception:
-                base = None
+            info = self._system_info()
+            base = info.get('sapi.client.web.upload.endpoint') or info.get('sapi.upload.endpoint')
         if not base:
             base = self.base_url.rstrip('/')
         self._upload_base = base.rstrip('/')
         return self._upload_base
 
-    def upload_file(self, file_path, folder_id):
+    def _max_upload_bytes(self):
+        # Per-file upload size limit advertised by the server (default 4096 MB).
+        if self._max_upload is None:
+            mb = self._system_info().get('sapi.upload.max-size-in-mb')
+            try:
+                mb = int(mb)
+            except (TypeError, ValueError):
+                mb = 4096
+            self._max_upload = mb * 1024 * 1024
+        return self._max_upload
+
+    def upload_file(self, file_path, folder_id, retries=3):
         upload_url = self._upload_base_url() + '/sapi/upload'
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
@@ -183,14 +207,36 @@ class CloudManager:
         content_type = mimetypes.guess_type(file_name)[0] or 'application/octet-stream'
         metadata = {"data":{"name":file_name,"size":file_size,"modificationdate":formatted_date,"contenttype":content_type,"folderid":folder_id}}
         params = {'action': 'save','acceptasynchronous': 'true','validationkey': self.validationkey,}
-        with open(file_path, 'rb') as file:
-            files = {
-                'data': (None, json.dumps(metadata), 'application/json'),
-                'file': (file_name, file, content_type)
-            }
-            response = self.session.post(upload_url, params=params, files=files)
-
-        return response.json()
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                with open(file_path, 'rb') as file:
+                    files = {
+                        'data': (None, json.dumps(metadata), 'application/json'),
+                        'file': (file_name, file, content_type)
+                    }
+                    response = self.session.post(upload_url, params=params, files=files, timeout=(30, 600))
+                # An expired session returns the HTML login page instead of JSON.
+                if response.status_code in (401, 403):
+                    raise SessionExpiredError(
+                        "Sesión inválida o caducada (HTTP %s). Refresca VALIDATION_KEY y "
+                        "SESSION_COOKIE desde el navegador." % response.status_code)
+                try:
+                    data = response.json()
+                except ValueError:
+                    raise SessionExpiredError(
+                        "Respuesta no-JSON del servidor al subir (probable sesión caducada). "
+                        "Refresca VALIDATION_KEY y SESSION_COOKIE.")
+                if isinstance(data, dict) and ('success' in data or data.get('id')):
+                    return data
+                last_error = data.get('error', data) if isinstance(data, dict) else data
+            except SessionExpiredError:
+                raise
+            except requests.RequestException as e:
+                last_error = e
+            if attempt < retries:
+                time.sleep(2 ** attempt)  # backoff: 2s, 4s, ...
+        raise RuntimeError("No se pudo subir %s tras %d intentos: %s" % (file_name, retries, last_error))
     
     def download_file(self, fileid, save_path=None):
         if save_path is None:
@@ -305,9 +351,13 @@ class CloudManager:
         # into the cloud: creates missing folders and uploads files that don't
         # already exist remotely (matched by name). It NEVER deletes anything from
         # the cloud (unlike sync_local_path) and skips files that already exist.
+        # Robust for large bulk uploads: skips over-size files, retries per file
+        # and keeps going on errors (the run is resumable since it matches by name).
         if parentid is False:
             parentid = self.get_root_folder_id()
         local_path = os.path.abspath(local_path)
+        max_bytes = self._max_upload_bytes()
+        stats = {'uploaded': 0, 'exists': 0, 'too_big': 0, 'failed': 0}
         def sync_folder(path, folderid):
             entries = os.listdir(path)
             local_dirs = [e for e in entries if os.path.isdir(os.path.join(path, e))]
@@ -326,8 +376,24 @@ class CloudManager:
             for fname in local_files:
                 full = os.path.join(path, fname)
                 if fname in remote_file_map:
+                    stats['exists'] += 1
                     print(full + " ya existe en el cloud")
-                else:
+                    continue
+                size = os.path.getsize(full)
+                if size > max_bytes:
+                    stats['too_big'] += 1
+                    print("SALTADO (%.0f MB > límite %.0f MB): %s" % (size / 1048576.0, max_bytes / 1048576.0, full))
+                    continue
+                try:
                     print("Subiendo " + full)
                     self.upload_file(full, folderid)
+                    stats['uploaded'] += 1
+                except SessionExpiredError:
+                    raise  # no point continuing once the session is dead
+                except Exception as e:
+                    stats['failed'] += 1
+                    print("ERROR subiendo %s: %s" % (full, e))
         sync_folder(local_path, parentid)
+        print("Resumen subida -> subidos: %d, ya existían: %d, saltados (grandes): %d, fallidos: %d"
+              % (stats['uploaded'], stats['exists'], stats['too_big'], stats['failed']))
+        return stats

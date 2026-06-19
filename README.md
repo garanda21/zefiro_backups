@@ -93,8 +93,34 @@ sizes, dates or hashes). This means:
   cloud folder. Updating already-existing files is planned for a future phase.
 
 The upload is **non-destructive**: it never deletes anything from the cloud. It only creates
-missing folders and uploads missing files. Very large files may be subject to the provider's
-upload size limit (`sapi.upload.max-size-in-mb`).
+missing folders and uploads missing files.
+
+### Robustness (large uploads)
+
+The upload is built to survive big bulk transfers:
+
+- **Single instance**: a lock (`/tmp/zefiro_sync.lock`) prevents overlapping runs, so a slow
+  upload won't be run again in parallel by the next cron tick.
+- **Retries**: each file is retried a few times with backoff on network errors; if a file
+  still fails it is logged and the run continues with the rest. Because matching is by name,
+  re-running resumes where it left off.
+- **Size limit**: files larger than the provider limit (`sapi.upload.max-size-in-mb`, e.g.
+  4096 MB on O2) are skipped with a log line instead of aborting the run.
+- **Expired session**: detected up front and during upload, with a clear message to refresh
+  `VALIDATION_KEY`/`SESSION_COOKIE`.
+- A summary line is printed at the end (uploaded / already existed / skipped / failed).
+
+### First (huge) upload tip
+
+For a large initial backup, run it **once, manually**, instead of relying on a frequent cron:
+
+```bash
+docker compose exec zefiro_backups python /app/sync.py
+```
+
+Keep `SYNC_CRON` infrequent (e.g. hourly) for the incremental syncs afterwards. Running it
+too frequently can race with the provider's **asynchronous indexing** (a just-uploaded file
+may not show up in the listing yet), which could re-upload it as a `(1)` duplicate.
 
 ## Disclaimer
 
