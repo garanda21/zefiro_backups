@@ -2,12 +2,17 @@ import requests
 import json
 import os
 import datetime
+import mimetypes
 
 class CloudManager:
-    def __init__(self, domain, username=None, password=None, validationkey=None, session_cookie=None):
+    def __init__(self, domain, username=None, password=None, validationkey=None, session_cookie=None, upload_endpoint=None):
         self.domain = domain
         self.username = username
         self.password = password
+        # Optional override for the upload endpoint. When not set it is resolved
+        # lazily from /sapi/system/information (see _upload_base_url).
+        self.upload_endpoint = upload_endpoint
+        self._upload_base = None
         self.session = requests.Session()
         # Some endpoints sit behind CloudFront/WAF and reject non-browser clients,
         # so present a browser-like User-Agent for every request.
@@ -132,22 +137,42 @@ class CloudManager:
         json_data = {"data":{"magic":False,"offline":False,"name":name,"parentid":parentid}}
         response = self.session.post(create_folder_url,json=json_data,params=params)
 
+    def _upload_base_url(self):
+        # Resolve the upload endpoint. Some providers (e.g. O2) serve uploads from a
+        # dedicated host (sapi.upload.endpoint) instead of the main domain.
+        if self._upload_base:
+            return self._upload_base
+        base = self.upload_endpoint
+        if not base:
+            try:
+                info_url = self.base_url + 'sapi/system/information'
+                response = self.session.get(info_url, params={'action': 'get'})
+                info = response.json()
+                base = info.get('sapi.client.web.upload.endpoint') or info.get('sapi.upload.endpoint')
+            except Exception:
+                base = None
+        if not base:
+            base = self.base_url.rstrip('/')
+        self._upload_base = base.rstrip('/')
+        return self._upload_base
+
     def upload_file(self, file_path, folder_id):
-        upload_url = self.base_url + 'sapi/upload'
+        upload_url = self._upload_base_url() + '/sapi/upload'
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
         mod_time = os.path.getmtime(file_path)
         mod_date = datetime.datetime.fromtimestamp(mod_time)
         formatted_date = mod_date.strftime("%Y%m%dT%H%M%SZ")
-        metadata = {"data":{"name":file_name,"size":file_size,"modificationdate":formatted_date,"contenttype":"application/pdf","folderid":folder_id}}
+        content_type = mimetypes.guess_type(file_name)[0] or 'application/octet-stream'
+        metadata = {"data":{"name":file_name,"size":file_size,"modificationdate":formatted_date,"contenttype":content_type,"folderid":folder_id}}
         params = {'action': 'save','acceptasynchronous': 'true','validationkey': self.validationkey,}
         with open(file_path, 'rb') as file:
             files = {
                 'data': (None, json.dumps(metadata), 'application/json'),
-                'file': (file_name, file, 'application/pdf')
+                'file': (file_name, file, content_type)
             }
             response = self.session.post(upload_url, params=params, files=files)
-        
+
         return response.json()
     
     def download_file(self, fileid, save_path=None):
@@ -186,12 +211,10 @@ class CloudManager:
         self.session.post(remove_file_url,json=json_data,params=params)
     
     def remove_folder(self,folder_id,softdelete):
+        # The server expects action=delete with a softdelete flag (same shape as
+        # remove_file); action=softdelete returns "Missing required parameter".
         remove_folder_url = self.base_url + 'sapi/media/folder'
-        if softdelete == True:
-            action = 'softdelete'
-        else:
-            action = 'delete'
-        params = {'action':action,'validationkey': self.validationkey}
+        params = {'action':'delete','softdelete':softdelete,'validationkey': self.validationkey}
         json_data = {'data':{'folders':[folder_id]}}
         self.session.post(remove_folder_url,json=json_data,params=params)
 
@@ -259,3 +282,35 @@ class CloudManager:
                 else:
                     print(local_file_path + " ya existe")
         sync_folder(parentid, local_path)
+
+    def upload_local_path(self, local_path, parentid=False):
+        # Non-destructive local -> cloud upload (Phase 1). Mirrors the local tree
+        # into the cloud: creates missing folders and uploads files that don't
+        # already exist remotely (matched by name). It NEVER deletes anything from
+        # the cloud (unlike sync_local_path) and skips files that already exist.
+        if parentid is False:
+            parentid = self.get_root_folder_id()
+        local_path = os.path.abspath(local_path)
+        def sync_folder(path, folderid):
+            entries = os.listdir(path)
+            local_dirs = [e for e in entries if os.path.isdir(os.path.join(path, e))]
+            local_files = [e for e in entries if os.path.isfile(os.path.join(path, e))]
+            remote_folder_map = {f['name']: f for f in self.list_folders(folderid)}
+            remote_file_map = {f['name']: f for f in self.list_files(folderid)}
+            for d in local_dirs:
+                if d in remote_folder_map:
+                    child_id = remote_folder_map[d]['id']
+                else:
+                    print("Creando carpeta " + os.path.join(path, d))
+                    self.create_folder(d, folderid)
+                    remote_folder_map = {f['name']: f for f in self.list_folders(folderid)}
+                    child_id = remote_folder_map[d]['id']
+                sync_folder(os.path.join(path, d), child_id)
+            for fname in local_files:
+                full = os.path.join(path, fname)
+                if fname in remote_file_map:
+                    print(full + " ya existe en el cloud")
+                else:
+                    print("Subiendo " + full)
+                    self.upload_file(full, folderid)
+        sync_folder(local_path, parentid)

@@ -25,9 +25,10 @@ It’s up to you to create UNCATEGORIZED_FOLDER inside BACKUPS_FOLDEE to include
 | PASSWORD    | your account password    |
 | VALIDATION_KEY | a validationkey captured from an authenticated browser session — see *Authentication* below |
 | SESSION_COOKIE | the `JSESSIONID` cookie value from the **same** browser session (required together with VALIDATION_KEY) |
-| BACKUPS_FOLDER_ID | ID of the root folder to take backups from |
+| BACKUPS_FOLDER_ID | ID of the root folder to sync (cloud side) / mirror (local side) |
 | UNCATEGORIZED_FOLDER_ID | ID of the folder to automatically move all the content uploaded from apps |
-| BACKUP_CRON | cronjob expression to schedule your backups |
+| SYNC_DIRECTION | sync direction: `download` (cloud → local, default), `upload` (local → cloud) or `both` |
+| SYNC_CRON | cronjob expression to schedule the sync (replaces `BACKUP_CRON`, which still works as a fallback) |
 | UNCATEGORIZED_CRON | cronjob expression to automatically move app uploaded content to UNCATEGORIZED_FOLDER_ID |
 
 ## Authentication
@@ -71,11 +72,29 @@ Check the JSON object on the Preview Tab
 
 ## The volume
 
-The volume maps the container path where files are downloaded (/backups) to a path on your host disk.
+The volume maps the container path that is synced (/backups) to a path on your host disk.
 
-## About the backup process
+## Sync direction
 
-Note that in the current version of Zefiro Backups, the backup process only checks whether a remote file already exists in your local path based on its filename. This means that if a file is modified directly in the cloud, it will not be downloaded again.
+Set `SYNC_DIRECTION` to control how `/backups` is synchronized with the cloud:
+
+- `download` (default): cloud → local. Downloads remote files that are not yet present locally.
+- `upload`: local → cloud. Uploads local files/folders that are not yet present in the cloud.
+- `both`: runs download first, then upload.
+
+## About the sync process
+
+The sync only checks whether a file already exists **by filename** (it does not yet compare
+sizes, dates or hashes). This means:
+
+- **download**: if a file is modified directly in the cloud, it will not be downloaded again
+  as long as a file with the same name already exists locally.
+- **upload**: a local file is uploaded only if no file with the same name exists in the target
+  cloud folder. Updating already-existing files is planned for a future phase.
+
+The upload is **non-destructive**: it never deletes anything from the cloud. It only creates
+missing folders and uploads missing files. Very large files may be subject to the provider's
+upload size limit (`sapi.upload.max-size-in-mb`).
 
 ## Disclaimer
 

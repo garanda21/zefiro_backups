@@ -5,11 +5,17 @@ services:
     restart: unless-stopped
     environment:
       PROVIDER_DOMAIN: zefiro.me
+      # Auth: use EMAIL + PASSWORD, OR session injection (VALIDATION_KEY [+ SESSION_COOKIE])
+      # for providers whose login is behind a WAF/MFA (e.g. O2). See the README.
       EMAIL: user@gmail.com
       PASSWORD: password1234
+      # VALIDATION_KEY: "xxxxx"
+      # SESSION_COOKIE: "xxxxx"
       BACKUPS_FOLDER_ID: "123456789"
       UNCATEGORIZED_FOLDER_ID: "987654321"
-      BACKUP_CRON: "0 2 * * *"
+      # Sync direction: download (cloud -> local) | upload (local -> cloud) | both
+      SYNC_DIRECTION: "download"
+      SYNC_CRON: "0 2 * * *"
       UNCATEGORIZED_CRON: "*/30 * * * *"
     volumes:
 
