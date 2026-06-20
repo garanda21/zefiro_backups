@@ -48,18 +48,25 @@ class CloudManager:
         user_info = response.json()
         return user_info['data']['validationkey']
     
+    def _json(self, response):
+        # Parse a JSON response, turning the "HTML login page" returned for an
+        # expired session into a clear SessionExpiredError instead of a confusing
+        # JSONDecodeError deep in the call stack.
+        try:
+            return response.json()
+        except ValueError:
+            raise SessionExpiredError(
+                "Sesión inválida o caducada (HTTP %s). Refresca VALIDATION_KEY y "
+                "SESSION_COOKIE desde el navegador." % response.status_code
+            )
+
     def check_session(self):
-        # Lightweight validity check. When the validationkey/JSESSIONID have
-        # expired the server returns HTML (login page) instead of JSON; surface a
-        # clear, actionable error instead of a confusing JSONDecodeError later on.
+        # Lightweight validity check performed up front.
         url = self.base_url + 'sapi/media/folder'
         response = self.session.post(url, params={'action': 'get', 'limit': 1, 'validationkey': self.validationkey})
-        try:
-            data = response.json()
-        except ValueError:
-            data = None
+        data = self._json(response)
         if response.status_code != 200 or not isinstance(data, dict) or 'data' not in data:
-            raise RuntimeError(
+            raise SessionExpiredError(
                 "Sesión inválida o caducada (HTTP %s). Refresca VALIDATION_KEY y "
                 "SESSION_COOKIE desde el navegador." % response.status_code
             )
@@ -77,51 +84,47 @@ class CloudManager:
         get_root_folder_id_url = self.base_url + 'sapi/media/folder'
         params = {'action': 'get','limit':1,'validationkey': self.validationkey}
         response = self.session.post(get_root_folder_id_url, params=params)
-        root_folders_info = json.loads(response.text)
+        root_folders_info = self._json(response)
         root_folder_id = root_folders_info['data']['folders'][0]['id']
         return root_folder_id
 
-    def list_folders(self,parentid,previous_folders=False):
-        if parentid == False:
-            parentId = 0
+    def list_folders(self, parentid, previous_folders=False):
+        # Iterative pagination (was recursive, which overflowed the stack and even
+        # looped forever when a folder had an exact multiple of 200 subfolders).
         list_subfolders_url = self.base_url + 'sapi/media/folder'
-        params = {'action': 'list','parentid':parentid, 'limit':200,'validationkey': self.validationkey}
-        if previous_folders == False:
-            previous_folders = []
-        else:
-            params['offset'] = len(previous_folders)
-        response = self.session.get(list_subfolders_url, params=params)
-        folders_data = json.loads(response.text)
-        folders = folders_data['data']['folders']
-        folders.extend(previous_folders)
-        if len(folders_data['data']['folders']) == 200:
-            return self.list_folders(parentid,folders)
-        else:
-            return folders
-        
-    def list_files(self, folderid,previous_files=False):
+        limit = 200
+        all_folders = []
+        while True:
+            params = {'action': 'list', 'parentid': parentid, 'limit': limit, 'validationkey': self.validationkey}
+            if all_folders:
+                params['offset'] = len(all_folders)
+            response = self.session.get(list_subfolders_url, params=params)
+            page = self._json(response)['data']['folders']
+            all_folders.extend(page)
+            if len(page) < limit:
+                return all_folders
+
+    def list_files(self, folderid, previous_files=False):
+        # Iterative pagination using the server's "more" flag (was recursive).
         list_folder_files_url = self.base_url + 'sapi/media'
-        params = {'action': 'get','folderid': folderid,'limit': 200,'validationkey': self.validationkey}
-        json_data = {"data":{"fields":["name","modificationdate","size"]}}
-        if previous_files == False:
-            previous_files = []
-        else:
-            params['offset'] = len(previous_files)
-        response = self.session.post(list_folder_files_url, params=params,json=json_data)
-        files_data = json.loads(response.text)
-        files = files_data['data']['media']
-        files.extend(previous_files)
-        if files_data['data']['more'] == True:
-            return self.list_files(folderid,files)
-        else:
-            return files
+        json_data = {"data": {"fields": ["name", "modificationdate", "size"]}}
+        all_files = []
+        while True:
+            params = {'action': 'get', 'folderid': folderid, 'limit': 200, 'validationkey': self.validationkey}
+            if all_files:
+                params['offset'] = len(all_files)
+            response = self.session.post(list_folder_files_url, params=params, json=json_data)
+            data = self._json(response)['data']
+            all_files.extend(data['media'])
+            if not data.get('more'):
+                return all_files
     
     def move_uncategorized_timeline(self,folder_id):
         get_timeline_ids_url = self.base_url + 'sapi/media/timeline'
         params = {'action':'get','validationkey':self.validationkey}
         json_data = {"data":{"source":"media","types":["picture","video"],"sortorder":"uploaded","origin":["omh"]}}
         response = self.session.post(get_timeline_ids_url, params=params,json=json_data)
-        file_ids_data = json.loads(response.text)
+        file_ids_data = self._json(response)
         #file_ids = file_ids_data['data']['periods'][0]['ids']
         if len(file_ids_data['data']['periods']) > 0:
             for period in file_ids_data['data']['periods']:
