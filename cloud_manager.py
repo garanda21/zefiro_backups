@@ -31,13 +31,22 @@ class CloudManager:
         self.base_url = f'https://{self.domain}/'
         if validationkey:
             # Session injection mode: the login endpoint is protected by the
-            # provider's WAF/MFA, so reuse a validationkey (and optionally the
-            # JSESSIONID cookie) captured from an authenticated browser session.
-            self.validationkey = validationkey
+            # provider's WAF/MFA, so reuse a session captured from the browser.
+            # The validation key is also a (longer-lived) cookie that the server
+            # may rotate; set it so we present a complete session and can follow
+            # rotations via the `validationkey` property below.
+            self._validationkey = validationkey
+            self.session.cookies.set('validationKey', validationkey, domain=self.domain)
             if session_cookie:
                 self.session.cookies.set('JSESSIONID', session_cookie, domain=self.domain)
         else:
-            self.validationkey = self.login()
+            self._validationkey = self.login()
+
+    @property
+    def validationkey(self):
+        # Prefer the (possibly rotated) cookie value so requests stay in sync with
+        # the server instead of pinning a stale key.
+        return self.session.cookies.get('validationKey') or self._validationkey
 
     def login(self):
         login_url = self.base_url + "sapi/login"
